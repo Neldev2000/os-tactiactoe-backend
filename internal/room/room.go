@@ -403,4 +403,13 @@ func getBoardJSON(board [3][3]string) [][]string {
 	}
 }
 
+// GetPlayerIDs returns a slice of player IDs in this room
+func (r *Room) GetPlayerIDs() []string {
+	playerIDs := make([]string, 0, len(r.Clients))
+	for client := range r.Clients {
+		playerIDs = append(playerIDs, client.GetID())
+	}
+	return playerIDs
+}
+
 // Este paquete será implementado en la Fase 3

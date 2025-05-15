@@ -99,6 +99,53 @@ func (h *Hub) DeleteRoom(roomID string) {
 	h.DeleteRoomChan <- roomID
 }
 
+// ListRooms implements interfaces.Hub
+func (h *Hub) ListRooms(client interfaces.Client) {
+	// Create a list of room information
+	roomsList := make([]models.RoomInfo, 0, len(h.Rooms))
+
+	for roomID, room := range h.Rooms {
+		// Get player IDs
+		playerIDs := room.GetPlayerIDs()
+
+		// Determine if room is full
+		isFull := len(playerIDs) >= 2
+
+		// Add room info to the list
+		roomInfo := models.RoomInfo{
+			RoomID:  roomID,
+			Players: playerIDs,
+			IsFull:  isFull,
+		}
+		roomsList = append(roomsList, roomInfo)
+	}
+
+	// Create the response
+	response := models.RoomListPayload{
+		Type:  "ROOM_LIST",
+		Rooms: roomsList,
+	}
+
+	// Serialize the response
+	responseBytes, err := json.Marshal(response)
+	if err != nil {
+		logger.Error("Error serializando lista de salas", logger.Fields{
+			"error":    err.Error(),
+			"clientID": client.GetID(),
+		})
+		errors.Internal(client.GetSendChannel(), client.GetID())
+		return
+	}
+
+	// Send the response to the client
+	client.GetSendChannel() <- responseBytes
+
+	logger.Info("Lista de salas enviada", logger.Fields{
+		"clientID":  client.GetID(),
+		"roomCount": len(roomsList),
+	})
+}
+
 // Run inicia el bucle principal del Hub
 func (h *Hub) Run() {
 	defer func() {

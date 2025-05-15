@@ -15,6 +15,9 @@ type Hub interface {
 
 	// DeleteRoom removes a room from the hub
 	DeleteRoom(roomID string)
+
+	// ListRooms sends the list of available rooms to the client
+	ListRooms(client Client)
 }
 
 // Client defines the interface for client operations needed by the hub

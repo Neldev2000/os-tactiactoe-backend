@@ -285,6 +285,29 @@ func (c *Client) ReadPump() {
 					errors.Internal(c.Send, c.ID)
 				}
 
+			case "LIST_ROOMS":
+				// Cliente solicita listar las salas disponibles
+				logger.Info("Cliente solicita listar salas", logger.Fields{
+					"clientID": c.ID,
+				})
+
+				if c.Hub != nil {
+					// Solicitar al hub que envíe la lista de salas al cliente
+					hub, ok := c.Hub.(interface {
+						ListRooms(client interfaces.Client)
+					})
+					if ok {
+						hub.ListRooms(c)
+					} else {
+						logger.Error("Hub no tiene método ListRooms", logger.Fields{
+							"clientID": c.ID,
+						})
+
+						// Enviar mensaje de error al cliente
+						errors.Internal(c.Send, c.ID)
+					}
+				}
+
 			default:
 				logger.Warn("Tipo de mensaje desconocido", logger.Fields{
 					"messageType": envelope.Type,

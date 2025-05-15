@@ -1,4 +1,3 @@
-
 # Tic-Tac-Toe Backend WebSocket API Documentation
 
 This document describes how to connect to the Tic-Tac-Toe backend server and interact with it using WebSockets.
@@ -55,6 +54,15 @@ Make a move in the game:
       "col": 0
     }
   }
+}
+```
+
+### List Rooms
+Request the list of available rooms:
+```json
+{
+  "type": "LIST_ROOMS",
+  "payload": {}
 }
 ```
 
@@ -145,6 +153,28 @@ Sent when a player disconnects:
 }
 ```
 
+### Room List
+Sent in response to a LIST_ROOMS request:
+```json
+{
+  "type": "ROOM_LIST",
+  "payload": {
+    "rooms": [
+      {
+        "roomID": "room-identifier-1",
+        "players": ["player-id-1", "player-id-2"],
+        "isFull": true
+      },
+      {
+        "roomID": "room-identifier-2",
+        "players": ["player-id-3"],
+        "isFull": false
+      }
+    ]
+  }
+}
+```
+
 ### Error
 Sent when an error occurs:
 ```json
@@ -170,15 +200,18 @@ Common error codes:
 ## Game Flow Example
 
 1. Connect to the WebSocket server
-2. Send `CREATE_ROOM` to create a new game room
-3. Receive `ROOM_CREATED` with your room ID
-4. Share the room ID with the second player
-5. Second player sends `JOIN_ROOM` with the room ID
-6. First player receives `PLAYER_JOINED`
-7. Both players receive `GAME_START`
-8. Players take turns sending `MAKE_MOVE`
-9. Both players receive `GAME_UPDATE` after each move
-10. When game ends, both players receive `GAME_OVER`
+2. Send `LIST_ROOMS` to see available rooms
+3. Either:
+   - Send `CREATE_ROOM` to create a new game room, or
+   - Send `JOIN_ROOM` with the room ID of an existing room
+4. If creating a room, receive `ROOM_CREATED` with your room ID
+5. Share the room ID with the second player
+6. Second player sends `JOIN_ROOM` with the room ID
+7. First player receives `PLAYER_JOINED`
+8. Both players receive `GAME_START`
+9. Players take turns sending `MAKE_MOVE`
+10. Both players receive `GAME_UPDATE` after each move
+11. When game ends, both players receive `GAME_OVER`
 
 ## Connection Management
 

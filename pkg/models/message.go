@@ -99,3 +99,21 @@ type PlayerLeftResponse struct {
 	Type     string `json:"type"`
 	PlayerID string `json:"playerId"`
 }
+
+// ListRoomsPayload is empty as it doesn't need any parameters
+type ListRoomsPayload struct {
+	// Empty for now, could contain filters later
+}
+
+// RoomInfo contains information about a room
+type RoomInfo struct {
+	RoomID  string   `json:"roomId"`
+	Players []string `json:"players"`
+	IsFull  bool     `json:"isFull"`
+}
+
+// RoomListPayload contains the list of available rooms
+type RoomListPayload struct {
+	Type  string     `json:"type"`
+	Rooms []RoomInfo `json:"rooms"`
+}
