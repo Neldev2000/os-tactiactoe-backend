@@ -2,6 +2,7 @@ package logger
 
 import (
 	"os"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 )
@@ -22,8 +23,25 @@ func Initialize() {
 		DisableTimestamp: false,
 	})
 
-	// Set log level (can be from config later)
-	Log.SetLevel(logrus.InfoLevel)
+	// Set default log level
+	logLevel := logrus.InfoLevel
+
+	// Check environment variable for log level
+	if envLevel := os.Getenv("TICTACTOE_LOG_LEVEL"); envLevel != "" {
+		switch strings.ToUpper(envLevel) {
+		case "DEBUG":
+			logLevel = logrus.DebugLevel
+		case "INFO":
+			logLevel = logrus.InfoLevel
+		case "WARN", "WARNING":
+			logLevel = logrus.WarnLevel
+		case "ERROR":
+			logLevel = logrus.ErrorLevel
+		}
+	}
+
+	Log.SetLevel(logLevel)
+	Info("Logger initialized", Fields{"level": logLevel.String()})
 }
 
 // Fields shorthand for logrus.Fields

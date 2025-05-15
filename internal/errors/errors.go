@@ -18,6 +18,7 @@ const (
 	ErrorInvalidPayload     = "ERROR_INVALID_PAYLOAD"
 	ErrorInternal           = "ERROR_INTERNAL"
 	ErrorUnknownMessageType = "ERROR_UNKNOWN_MESSAGE_TYPE"
+	ErrorMessageTooLarge    = "ERROR_MESSAGE_TOO_LARGE"
 )
 
 // SendError sends a structured error message to the client
@@ -95,4 +96,9 @@ func Internal(channel chan []byte, clientID string) {
 // UnknownMessageType creates an unknown message type error
 func UnknownMessageType(channel chan []byte, msgType string, clientID string) {
 	SendError(channel, ErrorUnknownMessageType, "Tipo de mensaje desconocido: "+msgType, clientID)
+}
+
+// MessageTooLarge creates a message too large error
+func MessageTooLarge(channel chan []byte, clientID string) {
+	SendError(channel, ErrorMessageTooLarge, "El mensaje excede el tamaño máximo permitido", clientID)
 }

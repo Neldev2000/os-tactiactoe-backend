@@ -14,6 +14,17 @@ import (
 	"nvivas/backend/tictactoe-go-server/pkg/models"
 )
 
+const (
+	// Tiempo máximo para esperar un mensaje del cliente
+	readWait = 60 * time.Second
+
+	// Tiempo entre pings
+	pingPeriod = (readWait * 9) / 10
+
+	// Límite máximo para mensajes entrantes
+	maxMessageSize = 1024 * 16 // 16KB - límite razonable para mensajes de juego
+)
+
 // Client representa una conexión de cliente WebSocket
 type Client struct {
 	ID   string
@@ -103,11 +114,11 @@ func (c *Client) ReadPump() {
 		}
 	}()
 
-	// Configurar conexión
-	c.Conn.SetReadLimit(1024) // Límite de tamaño de mensaje
-	c.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	// Configurar límites y timeouts para prevenir ataques DoS
+	c.Conn.SetReadLimit(maxMessageSize)
+	c.Conn.SetReadDeadline(time.Now().Add(readWait))
 	c.Conn.SetPongHandler(func(string) error {
-		c.Conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		c.Conn.SetReadDeadline(time.Now().Add(readWait))
 		return nil
 	})
 
@@ -134,6 +145,17 @@ func (c *Client) ReadPump() {
 					})
 				}
 				return // Salir del bucle si hay error
+			}
+
+			// Verificar tamaño del mensaje
+			if len(message) > maxMessageSize {
+				logger.Warn("Mensaje excede el tamaño máximo permitido", logger.Fields{
+					"clientID":    c.ID,
+					"messageSize": len(message),
+					"maxAllowed":  maxMessageSize,
+				})
+				errors.MessageTooLarge(c.Send, c.ID)
+				continue
 			}
 
 			// Deserializar el mensaje recibido
@@ -278,7 +300,7 @@ func (c *Client) ReadPump() {
 
 // WritePump maneja el envío de mensajes al WebSocket
 func (c *Client) WritePump() {
-	ticker := time.NewTicker(50 * time.Second)
+	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
 		c.Conn.Close()
@@ -295,9 +317,13 @@ func (c *Client) WritePump() {
 			return
 
 		case message, ok := <-c.Send:
+			// Establecer tiempo máximo para escribir
 			c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if !ok {
 				// El canal Send está cerrado
+				logger.Info("Canal Send cerrado, enviando mensaje de cierre", logger.Fields{
+					"clientID": c.ID,
+				})
 				c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
@@ -340,6 +366,7 @@ func (c *Client) WritePump() {
 			}
 
 		case <-ticker.C:
+			// Enviar ping periódico para mantener la conexión activa
 			c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				logger.Error("Error enviando ping", logger.Fields{
@@ -348,6 +375,7 @@ func (c *Client) WritePump() {
 				})
 				return
 			}
+			logger.Debug("Ping enviado", logger.Fields{"clientID": c.ID})
 		}
 	}
 }
