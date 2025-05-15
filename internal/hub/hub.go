@@ -1,18 +1,24 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
-	"log"
 
 	"github.com/google/uuid"
 
+	"nvivas/backend/tictactoe-go-server/internal/errors"
 	"nvivas/backend/tictactoe-go-server/internal/interfaces"
+	"nvivas/backend/tictactoe-go-server/internal/logger"
 	"nvivas/backend/tictactoe-go-server/internal/room"
 	"nvivas/backend/tictactoe-go-server/pkg/models"
 )
 
 // Hub gestiona clientes conectados y salas de juego
 type Hub struct {
+	// Context para control de cancelación
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	// Clientes conectados al servidor
 	Clients map[interfaces.Client]bool
 
@@ -31,6 +37,9 @@ type Hub struct {
 	// Canal para unirse a una sala existente
 	JoinRoomChan chan *JoinRequest
 
+	// Canal para eliminar una sala
+	DeleteRoomChan chan string
+
 	// Canal para mensajes a todos los clientes (opcional)
 	broadcast chan []byte
 }
@@ -43,15 +52,28 @@ type JoinRequest struct {
 
 // NewHub crea una nueva instancia de Hub
 func NewHub() *Hub {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	return &Hub{
+		ctx:            ctx,
+		cancel:         cancel,
 		Clients:        make(map[interfaces.Client]bool),
 		Rooms:          make(map[string]*room.Room),
 		Register:       make(chan interfaces.Client),
 		Unregister:     make(chan interfaces.Client),
 		CreateRoomChan: make(chan interfaces.Client),
 		JoinRoomChan:   make(chan *JoinRequest),
+		DeleteRoomChan: make(chan string),
 		broadcast:      make(chan []byte),
 	}
+}
+
+// Close cancela el contexto y libera recursos
+func (h *Hub) Close() {
+	h.cancel()
+	// No cerramos los canales aquí, porque podría haber goroutines escribiendo en ellos
+	// La cancelación del contexto debería ser suficiente para que salgan de sus bucles
+	logger.Info("Hub cerrado", nil)
 }
 
 // UnregisterClient implements interfaces.Hub
@@ -72,21 +94,46 @@ func (h *Hub) JoinRoom(roomID string, client interfaces.Client) {
 	}
 }
 
+// DeleteRoom implements interfaces.Hub
+func (h *Hub) DeleteRoom(roomID string) {
+	h.DeleteRoomChan <- roomID
+}
+
 // Run inicia el bucle principal del Hub
 func (h *Hub) Run() {
+	defer func() {
+		// Cleanup cuando Run termina
+		logger.Info("Finalizando Hub.Run, liberando recursos", nil)
+
+		// Cerrar todas las salas
+		for id, r := range h.Rooms {
+			logger.Info("Cerrando sala", logger.Fields{"roomID": id})
+			r.Close()
+		}
+	}()
+
 	for {
 		select {
+		case <-h.ctx.Done():
+			// Contexto cancelado, terminar
+			logger.Info("Contexto cancelado, terminando Hub.Run", nil)
+			return
+
 		case client := <-h.Register:
 			// Registrar un nuevo cliente
 			h.Clients[client] = true
-			log.Printf("Cliente registrado: %s", client.GetID())
+			logger.Info("Cliente registrado", logger.Fields{
+				"clientID": client.GetID(),
+			})
 
 		case client := <-h.Unregister:
 			// Verificar si el cliente está registrado
 			if _, ok := h.Clients[client]; ok {
 				// Eliminar el cliente
 				delete(h.Clients, client)
-				log.Printf("Cliente desregistrado: %s", client.GetID())
+				logger.Info("Cliente desregistrado", logger.Fields{
+					"clientID": client.GetID(),
+				})
 
 				// Cerrar el canal Send si no se ha cerrado ya
 				sendChan := client.GetSendChannel()
@@ -108,7 +155,7 @@ func (h *Hub) Run() {
 			roomID := uuid.NewString()
 
 			// Crear una instancia de Room
-			newRoom := room.NewRoom(roomID, h)
+			newRoom := room.NewRoom(roomID, h, h.ctx)
 
 			// Almacenar la sala en el mapa de salas
 			h.Rooms[roomID] = newRoom
@@ -132,7 +179,11 @@ func (h *Hub) Run() {
 			msgBytes, _ := json.Marshal(msg)
 			client.GetSendChannel() <- msgBytes
 
-			log.Printf("Sala creada: %s por cliente %s (símbolo X)", roomID, client.GetID())
+			logger.Info("Sala creada", logger.Fields{
+				"roomID":   roomID,
+				"clientID": client.GetID(),
+				"symbol":   "X",
+			})
 
 		case joinReq := <-h.JoinRoomChan:
 			// Task 29: Mejorar la lógica de unirse a salas
@@ -141,15 +192,12 @@ func (h *Hub) Run() {
 				// Verificar si la sala está llena antes de unirse
 				if len(room.Clients) >= 2 {
 					// Sala llena, enviar mensaje de error
-					errorMsg := models.ErrorResponse{
-						Type:    "ERROR_ROOM_FULL",
-						Message: "La sala ya está llena",
-					}
-					msgBytes, _ := json.Marshal(errorMsg)
-					joinReq.Client.GetSendChannel() <- msgBytes
+					errors.RoomFull(joinReq.Client.GetSendChannel(), joinReq.Client.GetID())
 
-					log.Printf("Error: Cliente %s intentó unirse a sala llena %s",
-						joinReq.Client.GetID(), joinReq.RoomID)
+					logger.Warn("Intento de unirse a sala llena", logger.Fields{
+						"roomID":   joinReq.RoomID,
+						"clientID": joinReq.Client.GetID(),
+					})
 					continue
 				}
 
@@ -161,18 +209,32 @@ func (h *Hub) Run() {
 				// La sala se encargará de enviar ROOM_JOINED y PLAYER_JOINED
 				room.Register <- joinReq.Client
 
-				log.Printf("Cliente %s se unió a sala %s", joinReq.Client.GetID(), joinReq.RoomID)
+				logger.Info("Cliente unido a sala", logger.Fields{
+					"roomID":   joinReq.RoomID,
+					"clientID": joinReq.Client.GetID(),
+				})
 			} else {
 				// Task 29: Si la sala no existe, enviar un mensaje de error claro
-				errorMsg := models.ErrorResponse{
-					Type:    "ERROR_ROOM_NOT_FOUND",
-					Message: "La sala solicitada no existe",
-				}
-				msgBytes, _ := json.Marshal(errorMsg)
-				joinReq.Client.GetSendChannel() <- msgBytes
+				errors.RoomNotFound(joinReq.Client.GetSendChannel(), joinReq.Client.GetID())
 
-				log.Printf("Error: Cliente %s intentó unirse a sala inexistente %s",
-					joinReq.Client.GetID(), joinReq.RoomID)
+				logger.Warn("Intento de unirse a sala inexistente", logger.Fields{
+					"roomID":   joinReq.RoomID,
+					"clientID": joinReq.Client.GetID(),
+				})
+			}
+
+		case roomID := <-h.DeleteRoomChan:
+			// Eliminar una sala cuando ya no es necesaria
+			if room, exists := h.Rooms[roomID]; exists {
+				logger.Info("Eliminando sala", logger.Fields{"roomID": roomID})
+
+				// Cancelar el contexto de la sala (ya que Room ahora usará contexto)
+				room.Close()
+
+				// Eliminar la sala del mapa
+				delete(h.Rooms, roomID)
+
+				logger.Info("Sala eliminada exitosamente", logger.Fields{"roomID": roomID})
 			}
 		}
 	}

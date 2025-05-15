@@ -1,13 +1,15 @@
 package client
 
 import (
+	"context"
 	"encoding/json"
-	"log"
 	"time"
 
 	"github.com/gorilla/websocket"
 
+	"nvivas/backend/tictactoe-go-server/internal/errors"
 	"nvivas/backend/tictactoe-go-server/internal/interfaces"
+	"nvivas/backend/tictactoe-go-server/internal/logger"
 	"nvivas/backend/tictactoe-go-server/internal/room"
 	"nvivas/backend/tictactoe-go-server/pkg/models"
 )
@@ -19,6 +21,35 @@ type Client struct {
 	Room interface{} // Se reemplazará con *room.Room cuando se use
 	Conn *websocket.Conn
 	Send chan []byte
+
+	// Context para control de cancelación
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// NewClient crea un nuevo cliente
+func NewClient(id string, hub interfaces.Hub, conn *websocket.Conn, parentCtx context.Context) *Client {
+	// Crear un contexto derivado que se pueda cancelar independientemente
+	ctx, cancel := context.WithCancel(parentCtx)
+
+	return &Client{
+		ID:     id,
+		Hub:    hub,
+		Room:   nil,
+		Conn:   conn,
+		Send:   make(chan []byte, 256), // Buffer para mensajes pendientes
+		ctx:    ctx,
+		cancel: cancel,
+	}
+}
+
+// Close cancela el contexto y libera recursos
+func (c *Client) Close() {
+	c.cancel()
+	c.Conn.Close()
+	// No cerramos el canal Send aquí para evitar data races
+	// La cancelación del contexto debería ser suficiente para que las goroutines terminen
+	logger.Info("Cliente cerrado", logger.Fields{"clientID": c.ID})
 }
 
 // GetID implements interfaces.Client
@@ -50,11 +81,26 @@ func (c *Client) GetRoom() interface{} {
 func (c *Client) ReadPump() {
 	defer func() {
 		// Cuando ReadPump termina, desregistrar cliente y cerrar conexiones
+		logger.Info("ReadPump terminando, desregistrando cliente", logger.Fields{
+			"clientID": c.ID,
+		})
+
 		if c.Hub != nil {
 			c.Hub.UnregisterClient(c)
 		}
+
+		// Cerrar la conexión y el canal
 		c.Conn.Close()
-		close(c.Send)
+
+		// Cerrar el canal si no está cerrado
+		select {
+		case _, ok := <-c.Send:
+			if ok {
+				close(c.Send)
+			}
+		default:
+			close(c.Send)
+		}
 	}()
 
 	// Configurar conexión
@@ -67,156 +113,165 @@ func (c *Client) ReadPump() {
 
 	// Bucle infinito para leer mensajes
 	for {
-		_, message, err := c.Conn.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err,
-				websocket.CloseGoingAway,
-				websocket.CloseAbnormalClosure) {
-				log.Printf("Error: %v", err)
-			}
-			break // Salir del bucle si hay error
-		}
-
-		// Deserializar el mensaje recibido
-		var envelope models.Envelope
-		if err := json.Unmarshal(message, &envelope); err != nil {
-			log.Printf("Error al deserializar mensaje: %v", err)
-
-			// Enviar mensaje de error al cliente
-			errorMsg := models.ErrorResponse{
-				Type:    "ERROR_INVALID_MESSAGE",
-				Message: "Formato de mensaje inválido",
-			}
-			msgBytes, _ := json.Marshal(errorMsg)
-			c.Send <- msgBytes
-			continue
-		}
-
-		// Manejar el mensaje según su tipo
-		switch envelope.Type {
-		case "CREATE_ROOM":
-			// Si el cliente solicita crear una sala, enviar al hub
-			log.Printf("Cliente %s solicita crear sala", c.ID)
-			if c.Hub != nil {
-				// Enviar el cliente al hub para crear una sala
-				c.Hub.UnregisterClient(c)
-				c.SetRoom(nil)
-				hub, ok := c.Hub.(interface {
-					CreateRoom(client interfaces.Client)
-				})
-				if ok {
-					hub.CreateRoom(c)
-				} else {
-					log.Printf("Error: Hub no tiene método CreateRoom")
-
-					// Enviar mensaje de error al cliente
-					errorMsg := models.ErrorResponse{
-						Type:    "ERROR_INTERNAL",
-						Message: "Error interno del servidor",
-					}
-					msgBytes, _ := json.Marshal(errorMsg)
-					c.Send <- msgBytes
-				}
-			}
-
-		case "JOIN_ROOM":
-			// Deserializar el payload para obtener el RoomID
-			var joinPayload models.JoinRoomPayload
-			if err := json.Unmarshal(envelope.Payload, &joinPayload); err != nil {
-				log.Printf("Error al deserializar JOIN_ROOM payload: %v", err)
-
-				// Enviar mensaje de error al cliente
-				errorMsg := models.ErrorResponse{
-					Type:    "ERROR_INVALID_PAYLOAD",
-					Message: "Datos de unión a sala inválidos",
-				}
-				msgBytes, _ := json.Marshal(errorMsg)
-				c.Send <- msgBytes
-				continue
-			}
-
-			log.Printf("Cliente %s solicita unirse a sala %s", c.ID, joinPayload.RoomID)
-			if c.Hub != nil {
-				// Si el cliente ya estaba en una sala, desregistrarlo
-				c.Hub.UnregisterClient(c)
-				c.SetRoom(nil)
-
-				// Enviar solicitud para unirse a la sala
-				hub, ok := c.Hub.(interface {
-					JoinRoom(roomID string, client interfaces.Client)
-				})
-				if ok {
-					hub.JoinRoom(joinPayload.RoomID, c)
-				} else {
-					log.Printf("Error: Hub no tiene método JoinRoom")
-
-					// Enviar mensaje de error al cliente
-					errorMsg := models.ErrorResponse{
-						Type:    "ERROR_INTERNAL",
-						Message: "Error interno del servidor",
-					}
-					msgBytes, _ := json.Marshal(errorMsg)
-					c.Send <- msgBytes
-				}
-			}
-
-		case "MAKE_MOVE":
-			// Verificar que el cliente está en una sala
-			if c.Room == nil {
-				log.Printf("Error: Cliente %s intentó hacer un movimiento sin estar en una sala", c.ID)
-				errorMsg := models.ErrorResponse{
-					Type:    "ERROR_NOT_IN_ROOM",
-					Message: "No estás en ninguna sala",
-				}
-				msgBytes, _ := json.Marshal(errorMsg)
-				c.Send <- msgBytes
-				continue
-			}
-
-			// Deserializar el payload para obtener las coordenadas del movimiento
-			var movePayload models.MakeMovePayload
-			if err := json.Unmarshal(envelope.Payload, &movePayload); err != nil {
-				log.Printf("Error al deserializar MAKE_MOVE payload: %v", err)
-
-				// Enviar mensaje de error al cliente
-				errorMsg := models.ErrorResponse{
-					Type:    "ERROR_INVALID_PAYLOAD",
-					Message: "Datos de movimiento inválidos",
-				}
-				msgBytes, _ := json.Marshal(errorMsg)
-				c.Send <- msgBytes
-				continue
-			}
-
-			// Enviar el movimiento a la sala
-			if roomObj, ok := c.Room.(*room.Room); ok && roomObj != nil {
-				playerMove := &models.PlayerMove{
-					Client:   c,
-					MoveData: movePayload.Move,
-				}
-				roomObj.ReceiveMove <- playerMove
-			} else {
-				log.Printf("Error: Room no es del tipo esperado")
-
-				// Enviar mensaje de error al cliente
-				errorMsg := models.ErrorResponse{
-					Type:    "ERROR_INTERNAL",
-					Message: "Error interno del servidor",
-				}
-				msgBytes, _ := json.Marshal(errorMsg)
-				c.Send <- msgBytes
-			}
+		select {
+		case <-c.ctx.Done():
+			// Contexto cancelado, terminar
+			logger.Info("Contexto cancelado, terminando ReadPump", logger.Fields{
+				"clientID": c.ID,
+			})
+			return
 
 		default:
-			log.Printf("Tipo de mensaje desconocido: %s", envelope.Type)
-
-			// Enviar mensaje de error al cliente
-			errorMsg := models.ErrorResponse{
-				Type:    "ERROR_UNKNOWN_MESSAGE_TYPE",
-				Message: "Tipo de mensaje desconocido",
+			// Intentar leer un mensaje
+			_, message, err := c.Conn.ReadMessage()
+			if err != nil {
+				if websocket.IsUnexpectedCloseError(err,
+					websocket.CloseGoingAway,
+					websocket.CloseAbnormalClosure) {
+					logger.Error("Error en conexión WebSocket", logger.Fields{
+						"error":    err.Error(),
+						"clientID": c.ID,
+					})
+				}
+				return // Salir del bucle si hay error
 			}
-			msgBytes, _ := json.Marshal(errorMsg)
-			c.Send <- msgBytes
+
+			// Deserializar el mensaje recibido
+			var envelope models.Envelope
+			if err := json.Unmarshal(message, &envelope); err != nil {
+				logger.Error("Error deserializando mensaje", logger.Fields{
+					"error":    err.Error(),
+					"clientID": c.ID,
+				})
+
+				// Enviar mensaje de error al cliente
+				errors.InvalidMessage(c.Send, c.ID)
+				continue
+			}
+
+			// Manejar el mensaje según su tipo
+			switch envelope.Type {
+			case "CREATE_ROOM":
+				// Si el cliente solicita crear una sala, enviar al hub
+				logger.Info("Cliente solicita crear sala", logger.Fields{
+					"clientID": c.ID,
+				})
+
+				if c.Hub != nil {
+					// Enviar el cliente al hub para crear una sala
+					c.Hub.UnregisterClient(c)
+					c.SetRoom(nil)
+					hub, ok := c.Hub.(interface {
+						CreateRoom(client interfaces.Client)
+					})
+					if ok {
+						hub.CreateRoom(c)
+					} else {
+						logger.Error("Hub no tiene método CreateRoom", logger.Fields{
+							"clientID": c.ID,
+						})
+
+						// Enviar mensaje de error al cliente
+						errors.Internal(c.Send, c.ID)
+					}
+				}
+
+			case "JOIN_ROOM":
+				// Deserializar el payload para obtener el RoomID
+				var joinPayload models.JoinRoomPayload
+				if err := json.Unmarshal(envelope.Payload, &joinPayload); err != nil {
+					logger.Error("Error deserializando payload JOIN_ROOM", logger.Fields{
+						"error":    err.Error(),
+						"clientID": c.ID,
+					})
+
+					// Enviar mensaje de error al cliente
+					errors.InvalidPayload(c.Send, "join room", c.ID)
+					continue
+				}
+
+				logger.Info("Cliente solicita unirse a sala", logger.Fields{
+					"clientID": c.ID,
+					"roomID":   joinPayload.RoomID,
+				})
+
+				if c.Hub != nil {
+					// Si el cliente ya estaba en una sala, desregistrarlo
+					c.Hub.UnregisterClient(c)
+					c.SetRoom(nil)
+
+					// Enviar solicitud para unirse a la sala
+					hub, ok := c.Hub.(interface {
+						JoinRoom(roomID string, client interfaces.Client)
+					})
+					if ok {
+						hub.JoinRoom(joinPayload.RoomID, c)
+					} else {
+						logger.Error("Hub no tiene método JoinRoom", logger.Fields{
+							"clientID": c.ID,
+						})
+
+						// Enviar mensaje de error al cliente
+						errors.Internal(c.Send, c.ID)
+					}
+				}
+
+			case "MAKE_MOVE":
+				// Verificar que el cliente está en una sala
+				if c.Room == nil {
+					logger.Warn("Cliente intentó hacer un movimiento sin estar en una sala", logger.Fields{
+						"clientID": c.ID,
+					})
+
+					errors.NotInRoom(c.Send, c.ID)
+					continue
+				}
+
+				// Deserializar el payload para obtener las coordenadas del movimiento
+				var movePayload models.MakeMovePayload
+				if err := json.Unmarshal(envelope.Payload, &movePayload); err != nil {
+					logger.Error("Error deserializando payload MAKE_MOVE", logger.Fields{
+						"error":    err.Error(),
+						"clientID": c.ID,
+					})
+
+					// Enviar mensaje de error al cliente
+					errors.InvalidPayload(c.Send, "make move", c.ID)
+					continue
+				}
+
+				// Enviar el movimiento a la sala
+				if roomObj, ok := c.Room.(*room.Room); ok && roomObj != nil {
+					playerMove := &models.PlayerMove{
+						Client:   c,
+						MoveData: movePayload.Move,
+					}
+					roomObj.ReceiveMove <- playerMove
+
+					logger.Info("Movimiento enviado a sala", logger.Fields{
+						"clientID": c.ID,
+						"roomID":   roomObj.ID,
+						"row":      movePayload.Move.Row,
+						"col":      movePayload.Move.Col,
+					})
+				} else {
+					logger.Error("Room no es del tipo esperado", logger.Fields{
+						"clientID": c.ID,
+					})
+
+					// Enviar mensaje de error al cliente
+					errors.Internal(c.Send, c.ID)
+				}
+
+			default:
+				logger.Warn("Tipo de mensaje desconocido", logger.Fields{
+					"messageType": envelope.Type,
+					"clientID":    c.ID,
+				})
+
+				// Enviar mensaje de error al cliente
+				errors.UnknownMessageType(c.Send, envelope.Type, c.ID)
+			}
 		}
 	}
 }
@@ -227,10 +282,18 @@ func (c *Client) WritePump() {
 	defer func() {
 		ticker.Stop()
 		c.Conn.Close()
+		logger.Info("WritePump terminado", logger.Fields{"clientID": c.ID})
 	}()
 
 	for {
 		select {
+		case <-c.ctx.Done():
+			// Contexto cancelado, terminar
+			logger.Info("Contexto cancelado, terminando WritePump", logger.Fields{
+				"clientID": c.ID,
+			})
+			return
+
 		case message, ok := <-c.Send:
 			c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if !ok {
@@ -241,22 +304,48 @@ func (c *Client) WritePump() {
 
 			w, err := c.Conn.NextWriter(websocket.TextMessage)
 			if err != nil {
+				logger.Error("Error obteniendo writer de WebSocket", logger.Fields{
+					"error":    err.Error(),
+					"clientID": c.ID,
+				})
 				return
 			}
-			w.Write(message)
+
+			if _, err := w.Write(message); err != nil {
+				logger.Error("Error escribiendo mensaje", logger.Fields{
+					"error":    err.Error(),
+					"clientID": c.ID,
+				})
+				return
+			}
 
 			// Añadir cualquier mensaje pendiente en el canal
 			n := len(c.Send)
 			for i := 0; i < n; i++ {
-				w.Write(<-c.Send)
+				msg := <-c.Send
+				if _, err := w.Write(msg); err != nil {
+					logger.Error("Error escribiendo mensaje encolado", logger.Fields{
+						"error":    err.Error(),
+						"clientID": c.ID,
+					})
+				}
 			}
 
 			if err := w.Close(); err != nil {
+				logger.Error("Error cerrando writer de WebSocket", logger.Fields{
+					"error":    err.Error(),
+					"clientID": c.ID,
+				})
 				return
 			}
+
 		case <-ticker.C:
 			c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				logger.Error("Error enviando ping", logger.Fields{
+					"error":    err.Error(),
+					"clientID": c.ID,
+				})
 				return
 			}
 		}

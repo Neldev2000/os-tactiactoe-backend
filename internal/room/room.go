@@ -1,10 +1,13 @@
 package room
 
 import (
+	"context"
 	"encoding/json"
-	"log"
+
+	"nvivas/backend/tictactoe-go-server/internal/errors"
 	"nvivas/backend/tictactoe-go-server/internal/game"
 	"nvivas/backend/tictactoe-go-server/internal/interfaces"
+	"nvivas/backend/tictactoe-go-server/internal/logger"
 	"nvivas/backend/tictactoe-go-server/pkg/models"
 )
 
@@ -18,10 +21,17 @@ type Room struct {
 	Unregister  chan interfaces.Client     // Canal para desregistrar clientes
 	Broadcast   chan []byte                // Canal para mensajes a todos los clientes
 	ReceiveMove chan *models.PlayerMove    // Canal para recibir movimientos
+
+	// Context para control de cancelación
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // NewRoom crea una nueva sala de juego
-func NewRoom(id string, hub interfaces.Hub) *Room {
+func NewRoom(id string, hub interfaces.Hub, parentCtx context.Context) *Room {
+	// Crear un contexto derivado que se pueda cancelar independientemente
+	ctx, cancel := context.WithCancel(parentCtx)
+
 	return &Room{
 		ID:          id,
 		Hub:         hub,
@@ -31,13 +41,57 @@ func NewRoom(id string, hub interfaces.Hub) *Room {
 		Unregister:  make(chan interfaces.Client),
 		Broadcast:   make(chan []byte),
 		ReceiveMove: make(chan *models.PlayerMove),
+		ctx:         ctx,
+		cancel:      cancel,
 	}
+}
+
+// Close cancela el contexto y libera recursos
+func (r *Room) Close() {
+	r.cancel()
+	// No cerramos los canales aquí, porque podría haber goroutines escribiendo en ellos
+	// La cancelación del contexto debería ser suficiente para que salgan de sus bucles
+	logger.Info("Sala cerrada", logger.Fields{"roomID": r.ID})
 }
 
 // Run inicia el bucle principal de la sala
 func (r *Room) Run() {
+	defer func() {
+		// Cleanup cuando Run termina
+		logger.Info("Finalizando Room.Run, liberando recursos", logger.Fields{
+			"roomID": r.ID,
+		})
+
+		// Informar a los clientes que la sala se ha cerrado
+		for client := range r.Clients {
+			// Desasociar el cliente de la sala
+			client.SetRoom(nil)
+
+			// Enviar mensaje de sala cerrada
+			closeMsg := models.BaseMessage{Type: "ROOM_CLOSED"}
+			msgBytes, _ := json.Marshal(closeMsg)
+
+			select {
+			case client.GetSendChannel() <- msgBytes:
+				// Mensaje enviado con éxito
+			default:
+				// Error al enviar, el canal posiblemente esté cerrado
+			}
+		}
+
+		// Limpiar el mapa de clientes
+		r.Clients = make(map[interfaces.Client]bool)
+	}()
+
 	for {
 		select {
+		case <-r.ctx.Done():
+			// Contexto cancelado, terminar
+			logger.Info("Contexto cancelado, terminando Room.Run", logger.Fields{
+				"roomID": r.ID,
+			})
+			return
+
 		case client := <-r.Register:
 			// Añadir cliente a r.Clients
 			r.Clients[client] = true
@@ -47,12 +101,7 @@ func (r *Room) Run() {
 
 			// Si hay más de 2 jugadores, rechazar
 			if playerCount > 2 {
-				errorMsg := models.ErrorResponse{
-					Type:    "ERROR_ROOM_FULL",
-					Message: "La sala ya está llena",
-				}
-				msgBytes, _ := json.Marshal(errorMsg)
-				client.GetSendChannel() <- msgBytes
+				errors.RoomFull(client.GetSendChannel(), client.GetID())
 
 				// Eliminar el cliente
 				delete(r.Clients, client)
@@ -82,8 +131,11 @@ func (r *Room) Run() {
 				msgBytes, _ := json.Marshal(roomInfo)
 				client.GetSendChannel() <- msgBytes
 
-				log.Printf("Jugador %s (símbolo %s) está esperando un oponente en sala %s",
-					client.GetID(), symbol, r.ID)
+				logger.Info("Jugador esperando oponente", logger.Fields{
+					"roomID":   r.ID,
+					"clientID": client.GetID(),
+					"symbol":   symbol,
+				})
 			} else if playerCount == 2 {
 				// Para el segundo jugador, asignar el símbolo contrario al del primer jugador
 				var firstPlayerSymbol string
@@ -130,11 +182,7 @@ func (r *Room) Run() {
 				client.GetSendChannel() <- joinedMsgBytes
 
 				// Convertir el tablero a formato JSON para el mensaje
-				boardJSON := [][]string{
-					{r.GameState.Board[0][0], r.GameState.Board[0][1], r.GameState.Board[0][2]},
-					{r.GameState.Board[1][0], r.GameState.Board[1][1], r.GameState.Board[1][2]},
-					{r.GameState.Board[2][0], r.GameState.Board[2][1], r.GameState.Board[2][2]},
-				}
+				boardJSON := getBoardJSON(r.GameState.Board)
 
 				// Mensaje mejorado de inicio de juego con estado completo
 				gameStartMsg := models.GameStartResponse{
@@ -150,9 +198,13 @@ func (r *Room) Run() {
 					c.GetSendChannel() <- startBytes
 				}
 
-				log.Printf("¡Juego iniciado en sala %s! Jugador %s (símbolo %s) vs Jugador %s (símbolo %s)",
-					r.ID, firstPlayer.GetID(), r.GameState.PlayerSymbols[firstPlayer.GetID()],
-					client.GetID(), symbol)
+				logger.Info("Juego iniciado", logger.Fields{
+					"roomID":        r.ID,
+					"player1ID":     firstPlayer.GetID(),
+					"player1Symbol": r.GameState.PlayerSymbols[firstPlayer.GetID()],
+					"player2ID":     client.GetID(),
+					"player2Symbol": symbol,
+				})
 			}
 
 		case client := <-r.Unregister:
@@ -194,15 +246,26 @@ func (r *Room) Run() {
 						c.GetSendChannel() <- overBytes
 					}
 
-					log.Printf("Jugador %s (símbolo %s) abandonó la sala %s",
-						client.GetID(), symbol, r.ID)
+					logger.Info("Jugador abandonó la sala", logger.Fields{
+						"roomID":   r.ID,
+						"clientID": client.GetID(),
+						"symbol":   symbol,
+					})
 				}
 
 				// Si la sala queda vacía, auto-destruirse
 				if len(r.Clients) == 0 {
-					log.Printf("Sala %s vacía, debería ser eliminada", r.ID)
-					// En una implementación más completa, tendríamos:
-					// r.Hub.DeleteRoom(r.ID)
+					logger.Info("Sala vacía, eliminando", logger.Fields{"roomID": r.ID})
+
+					// Verificar si el Hub tiene método para eliminar salas
+					hubWithDelete, ok := r.Hub.(interface {
+						DeleteRoom(roomID string)
+					})
+
+					if ok {
+						// Informar al Hub que elimine esta sala
+						hubWithDelete.DeleteRoom(r.ID)
+					}
 				}
 			}
 
@@ -223,7 +286,7 @@ func (r *Room) Run() {
 			// Obtener client y moveData del PlayerMove
 			moveClient, ok := moveReq.Client.(interfaces.Client)
 			if !ok {
-				log.Printf("Error: Cliente en ReceiveMove no es del tipo correcto")
+				logger.Error("Cliente en ReceiveMove no es del tipo correcto", nil)
 				continue
 			}
 
@@ -233,24 +296,14 @@ func (r *Room) Run() {
 			playerSymbol, ok := r.GameState.PlayerSymbols[moveClient.GetID()]
 			if !ok {
 				// Cliente no registrado en el juego
-				errorMsg := models.ErrorResponse{
-					Type:    "ERROR_NOT_IN_GAME",
-					Message: "No eres parte de este juego",
-				}
-				msgBytes, _ := json.Marshal(errorMsg)
-				moveClient.GetSendChannel() <- msgBytes
+				errors.NotInGame(moveClient.GetSendChannel(), moveClient.GetID())
 				continue
 			}
 
 			// Validar si es el turno del cliente
 			if r.GameState.CurrentTurnSymbol != playerSymbol {
 				// No es el turno de este jugador
-				errorMsg := models.ErrorResponse{
-					Type:    "ERROR_NOT_YOUR_TURN",
-					Message: "No es tu turno",
-				}
-				msgBytes, _ := json.Marshal(errorMsg)
-				moveClient.GetSendChannel() <- msgBytes
+				errors.NotYourTurn(moveClient.GetSendChannel(), moveClient.GetID())
 				continue
 			}
 
@@ -258,12 +311,7 @@ func (r *Room) Run() {
 			err := game.ApplyMove(r.GameState, playerSymbol, moveData.Row, moveData.Col)
 			if err != nil {
 				// Movimiento inválido
-				errorMsg := models.ErrorResponse{
-					Type:    "ERROR_INVALID_MOVE",
-					Message: err.Error(),
-				}
-				msgBytes, _ := json.Marshal(errorMsg)
-				moveClient.GetSendChannel() <- msgBytes
+				errors.InvalidMove(moveClient.GetSendChannel(), err.Error(), moveClient.GetID())
 				continue
 			}
 
@@ -284,8 +332,13 @@ func (r *Room) Run() {
 				client.GetSendChannel() <- updateBytes
 			}
 
-			log.Printf("Jugador %s (símbolo %s) hizo un movimiento en (%d,%d)",
-				moveClient.GetID(), playerSymbol, moveData.Row, moveData.Col)
+			logger.Info("Movimiento realizado", logger.Fields{
+				"roomID":   r.ID,
+				"clientID": moveClient.GetID(),
+				"symbol":   playerSymbol,
+				"row":      moveData.Row,
+				"col":      moveData.Col,
+			})
 
 			// Si el juego ha terminado, enviar mensaje adicional
 			if r.GameState.IsGameOver {
@@ -300,11 +353,14 @@ func (r *Room) Run() {
 							break
 						}
 					}
-					log.Printf("¡Juego terminado en sala %s! Ganador: Jugador %s (símbolo %s)",
-						r.ID, winner, r.GameState.Winner)
+					logger.Info("Juego terminado con ganador", logger.Fields{
+						"roomID":    r.ID,
+						"winnerID":  winner,
+						"winSymbol": r.GameState.Winner,
+					})
 				} else {
 					isDraw = true
-					log.Printf("¡Juego terminado en sala %s! Resultado: Empate", r.ID)
+					logger.Info("Juego terminado en empate", logger.Fields{"roomID": r.ID})
 				}
 
 				// Enviar mensaje GAME_OVER con información detallada
@@ -318,6 +374,20 @@ func (r *Room) Run() {
 
 				for client := range r.Clients {
 					client.GetSendChannel() <- endBytes
+				}
+
+				// Task 33: Programar la eliminación de la sala después de que el juego termina
+				// ya que no se espera más actividad en ella
+				logger.Info("Juego terminado, programando eliminación de sala", logger.Fields{"roomID": r.ID})
+
+				// Verificar si el Hub tiene método para eliminar salas
+				hubWithDelete, ok := r.Hub.(interface {
+					DeleteRoom(roomID string)
+				})
+
+				if ok {
+					// Informar al Hub que elimine esta sala
+					hubWithDelete.DeleteRoom(r.ID)
 				}
 			}
 		}

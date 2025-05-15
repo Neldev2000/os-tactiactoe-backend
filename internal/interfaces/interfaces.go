@@ -12,6 +12,9 @@ type Hub interface {
 
 	// JoinRoom adds a client to an existing room
 	JoinRoom(roomID string, client Client)
+
+	// DeleteRoom removes a room from the hub
+	DeleteRoom(roomID string)
 }
 
 // Client defines the interface for client operations needed by the hub
@@ -30,4 +33,7 @@ type Client interface {
 
 	// GetRoom gets the client's current room
 	GetRoom() interface{}
+
+	// Close releases resources and cancels goroutines
+	Close()
 }
