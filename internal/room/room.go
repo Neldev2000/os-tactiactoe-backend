@@ -71,11 +71,16 @@ func (r *Room) Run() {
 			closeMsg := models.BaseMessage{Type: "ROOM_CLOSED"}
 			msgBytes, _ := json.Marshal(closeMsg)
 
+			// Add safety check to prevent sending to closed channels
 			select {
 			case client.GetSendChannel() <- msgBytes:
 				// Mensaje enviado con éxito
 			default:
-				// Error al enviar, el canal posiblemente esté cerrado
+				// Skip if channel is closed or full
+				logger.Warn("No se pudo enviar mensaje, canal posiblemente cerrado", logger.Fields{
+					"clientID": client.GetID(),
+					"roomID":   r.ID,
+				})
 			}
 		}
 
@@ -129,7 +134,16 @@ func (r *Room) Run() {
 					Symbol:   symbol,
 				}
 				msgBytes, _ := json.Marshal(roomInfo)
-				client.GetSendChannel() <- msgBytes
+
+				select {
+				case client.GetSendChannel() <- msgBytes:
+					// Mensaje enviado con éxito
+				default:
+					logger.Warn("No se pudo enviar WAITING_FOR_OPPONENT, canal posiblemente cerrado", logger.Fields{
+						"clientID": client.GetID(),
+						"roomID":   r.ID,
+					})
+				}
 
 				logger.Info("Jugador esperando oponente", logger.Fields{
 					"roomID":   r.ID,
@@ -169,7 +183,16 @@ func (r *Room) Run() {
 					PlayerID: client.GetID(),
 				}
 				joinedBytes, _ := json.Marshal(playerJoinedMsg)
-				firstPlayer.GetSendChannel() <- joinedBytes
+
+				select {
+				case firstPlayer.GetSendChannel() <- joinedBytes:
+					// Mensaje enviado con éxito
+				default:
+					logger.Warn("No se pudo enviar PLAYER_JOINED, canal posiblemente cerrado", logger.Fields{
+						"clientID": firstPlayer.GetID(),
+						"roomID":   r.ID,
+					})
+				}
 
 				// Informar al segundo jugador que se unió a la sala
 				roomJoinedMsg := models.RoomJoinedResponse{
@@ -179,7 +202,16 @@ func (r *Room) Run() {
 					Symbol:   symbol,
 				}
 				joinedMsgBytes, _ := json.Marshal(roomJoinedMsg)
-				client.GetSendChannel() <- joinedMsgBytes
+
+				select {
+				case client.GetSendChannel() <- joinedMsgBytes:
+					// Mensaje enviado con éxito
+				default:
+					logger.Warn("No se pudo enviar ROOM_JOINED, canal posiblemente cerrado", logger.Fields{
+						"clientID": client.GetID(),
+						"roomID":   r.ID,
+					})
+				}
 
 				// Convertir el tablero a formato JSON para el mensaje
 				boardJSON := getBoardJSON(r.GameState.Board)
@@ -195,7 +227,15 @@ func (r *Room) Run() {
 
 				// Enviar mensaje GAME_START a ambos jugadores
 				for c := range r.Clients {
-					c.GetSendChannel() <- startBytes
+					select {
+					case c.GetSendChannel() <- startBytes:
+						// Mensaje enviado con éxito
+					default:
+						logger.Warn("No se pudo enviar GAME_START, canal posiblemente cerrado", logger.Fields{
+							"clientID": c.GetID(),
+							"roomID":   r.ID,
+						})
+					}
 				}
 
 				logger.Info("Juego iniciado", logger.Fields{
@@ -232,7 +272,15 @@ func (r *Room) Run() {
 					msgBytes, _ := json.Marshal(playerLeftMsg)
 
 					for c := range r.Clients {
-						c.GetSendChannel() <- msgBytes
+						select {
+						case c.GetSendChannel() <- msgBytes:
+							// Mensaje enviado con éxito
+						default:
+							logger.Warn("No se pudo enviar PLAYER_LEFT, canal posiblemente cerrado", logger.Fields{
+								"clientID": c.GetID(),
+								"roomID":   r.ID,
+							})
+						}
 
 						// También enviar un mensaje GAME_OVER ya que no se puede continuar
 						// si un jugador abandona
@@ -243,7 +291,16 @@ func (r *Room) Run() {
 							IsDraw: false,
 						}
 						overBytes, _ := json.Marshal(gameOverMsg)
-						c.GetSendChannel() <- overBytes
+
+						select {
+						case c.GetSendChannel() <- overBytes:
+							// Mensaje enviado con éxito
+						default:
+							logger.Warn("No se pudo enviar GAME_OVER por abandono, canal posiblemente cerrado", logger.Fields{
+								"clientID": c.GetID(),
+								"roomID":   r.ID,
+							})
+						}
 					}
 
 					logger.Info("Jugador abandonó la sala", logger.Fields{
@@ -277,8 +334,11 @@ func (r *Room) Run() {
 					// Mensaje enviado con éxito
 				default:
 					// Error al enviar, cliente probablemente desconectado
-					close(client.GetSendChannel())
-					delete(r.Clients, client)
+					logger.Warn("No se pudo enviar mensaje broadcast, canal posiblemente cerrado", logger.Fields{
+						"clientID": client.GetID(),
+						"roomID":   r.ID,
+					})
+					// Ya no cerramos el canal aquí, lo dejamos para el Hub
 				}
 			}
 
@@ -329,7 +389,15 @@ func (r *Room) Run() {
 
 			// Enviar actualización a todos los jugadores
 			for client := range r.Clients {
-				client.GetSendChannel() <- updateBytes
+				select {
+				case client.GetSendChannel() <- updateBytes:
+					// Mensaje enviado con éxito
+				default:
+					logger.Warn("No se pudo enviar GAME_UPDATE, canal posiblemente cerrado", logger.Fields{
+						"clientID": client.GetID(),
+						"roomID":   r.ID,
+					})
+				}
 			}
 
 			logger.Info("Movimiento realizado", logger.Fields{
@@ -373,7 +441,15 @@ func (r *Room) Run() {
 				endBytes, _ := json.Marshal(endMsg)
 
 				for client := range r.Clients {
-					client.GetSendChannel() <- endBytes
+					select {
+					case client.GetSendChannel() <- endBytes:
+						// Mensaje enviado con éxito
+					default:
+						logger.Warn("No se pudo enviar GAME_OVER, canal posiblemente cerrado", logger.Fields{
+							"clientID": client.GetID(),
+							"roomID":   r.ID,
+						})
+					}
 				}
 
 				// Task 33: Programar la eliminación de la sala después de que el juego termina

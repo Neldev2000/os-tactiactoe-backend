@@ -180,9 +180,10 @@ func (c *Client) ReadPump() {
 				})
 
 				if c.Hub != nil {
-					// Enviar el cliente al hub para crear una sala
-					c.Hub.UnregisterClient(c)
-					c.SetRoom(nil)
+					// Ya no desregistramos al cliente aquí
+					// c.Hub.UnregisterClient(c)
+					// c.SetRoom(nil)
+
 					hub, ok := c.Hub.(interface {
 						CreateRoom(client interfaces.Client)
 					})
@@ -218,9 +219,9 @@ func (c *Client) ReadPump() {
 				})
 
 				if c.Hub != nil {
-					// Si el cliente ya estaba en una sala, desregistrarlo
-					c.Hub.UnregisterClient(c)
-					c.SetRoom(nil)
+					// Ya no desregistramos al cliente aquí
+					// c.Hub.UnregisterClient(c)
+					// c.SetRoom(nil)
 
 					// Enviar solicitud para unirse a la sala
 					hub, ok := c.Hub.(interface {

@@ -146,6 +146,26 @@ func (h *Hub) ListRooms(client interfaces.Client) {
 	})
 }
 
+// createErrorMessage crea un mensaje de error serializado en JSON
+func createErrorMessage(errorType, message string, clientID string) []byte {
+	errorMsg := models.ErrorResponse{
+		Type:    errorType,
+		Message: message,
+	}
+
+	msgBytes, err := json.Marshal(errorMsg)
+	if err != nil {
+		logger.Error("Failed to marshal error message", logger.Fields{
+			"error":     err.Error(),
+			"errorType": errorType,
+			"clientID":  clientID,
+		})
+		return []byte{}
+	}
+
+	return msgBytes
+}
+
 // Run inicia el bucle principal del Hub
 func (h *Hub) Run() {
 	defer func() {
@@ -210,11 +230,17 @@ func (h *Hub) Run() {
 			// Iniciar la sala como goroutine
 			go newRoom.Run()
 
-			// Registrar al cliente creador en la sala
-			newRoom.Register <- client
+			// Si el cliente ya estaba en una sala, limpiamos la referencia
+			oldRoom := client.GetRoom()
+			if oldRoom != nil {
+				client.SetRoom(nil)
+			}
 
 			// Actualizar la referencia a la sala en el cliente
 			client.SetRoom(newRoom)
+
+			// Registrar al cliente creador en la sala
+			newRoom.Register <- client
 
 			// Task 28: Enviar mensaje ROOM_CREATED { roomID, playerSymbol, playerID } al creador
 			msg := models.RoomCreatedResponse{
@@ -224,7 +250,17 @@ func (h *Hub) Run() {
 				Symbol:   "X", // El creador siempre es X
 			}
 			msgBytes, _ := json.Marshal(msg)
-			client.GetSendChannel() <- msgBytes
+
+			// Usar select para enviar de forma segura
+			select {
+			case client.GetSendChannel() <- msgBytes:
+				// Mensaje enviado con éxito
+			default:
+				logger.Warn("No se pudo enviar mensaje ROOM_CREATED, canal posiblemente cerrado", logger.Fields{
+					"clientID": client.GetID(),
+					"roomID":   roomID,
+				})
+			}
 
 			logger.Info("Sala creada", logger.Fields{
 				"roomID":   roomID,
@@ -239,13 +275,29 @@ func (h *Hub) Run() {
 				// Verificar si la sala está llena antes de unirse
 				if len(room.Clients) >= 2 {
 					// Sala llena, enviar mensaje de error
-					errors.RoomFull(joinReq.Client.GetSendChannel(), joinReq.Client.GetID())
+					select {
+					case joinReq.Client.GetSendChannel() <- createErrorMessage(errors.ErrorRoomFull, "La sala ya está llena", joinReq.Client.GetID()):
+						// Mensaje enviado con éxito
+					default:
+						logger.Warn("No se pudo enviar mensaje de error, canal posiblemente cerrado", logger.Fields{
+							"clientID": joinReq.Client.GetID(),
+							"roomID":   joinReq.RoomID,
+						})
+					}
 
 					logger.Warn("Intento de unirse a sala llena", logger.Fields{
 						"roomID":   joinReq.RoomID,
 						"clientID": joinReq.Client.GetID(),
 					})
 					continue
+				}
+
+				// Si el cliente ya estaba en una sala, primero limpiamos la referencia
+				oldRoom := joinReq.Client.GetRoom()
+				if oldRoom != nil {
+					// Ya no estamos usando el canal Unregister directamente
+					// Simplemente limpiamos la referencia
+					joinReq.Client.SetRoom(nil)
 				}
 
 				// La sala existe y tiene espacio
@@ -262,7 +314,15 @@ func (h *Hub) Run() {
 				})
 			} else {
 				// Task 29: Si la sala no existe, enviar un mensaje de error claro
-				errors.RoomNotFound(joinReq.Client.GetSendChannel(), joinReq.Client.GetID())
+				select {
+				case joinReq.Client.GetSendChannel() <- createErrorMessage(errors.ErrorRoomNotFound, "La sala solicitada no existe", joinReq.Client.GetID()):
+					// Mensaje enviado con éxito
+				default:
+					logger.Warn("No se pudo enviar mensaje de error, canal posiblemente cerrado", logger.Fields{
+						"clientID": joinReq.Client.GetID(),
+						"roomID":   joinReq.RoomID,
+					})
+				}
 
 				logger.Warn("Intento de unirse a sala inexistente", logger.Fields{
 					"roomID":   joinReq.RoomID,

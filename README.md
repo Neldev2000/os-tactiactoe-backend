@@ -38,7 +38,7 @@ Request to join an existing room:
 {
   "type": "JOIN_ROOM",
   "payload": {
-    "roomID": "room-identifier"
+    "roomID": "ad275651-fb84-4f89-92f0-7a77299e8645"
   }
 }
 ```

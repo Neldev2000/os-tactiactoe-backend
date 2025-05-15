@@ -44,8 +44,16 @@ func SendError(channel chan []byte, errorType, message string, clientID string) 
 		"clientID":  clientID,
 	})
 
-	// Send to client
-	channel <- msgBytes
+	// Send to client using non-blocking select
+	select {
+	case channel <- msgBytes:
+		// Message sent successfully
+	default:
+		logger.Warn("No se pudo enviar mensaje de error, canal posiblemente cerrado", logger.Fields{
+			"clientID":  clientID,
+			"errorType": errorType,
+		})
+	}
 }
 
 // RoomFull creates a room full error
