@@ -40,8 +40,6 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  wsReadBufferSize,
 	WriteBufferSize: wsWriteBufferSize,
 	CheckOrigin: func(r *http.Request) bool {
-		// En producción, esto debería validar el origen
-		// Para desarrollo, permitimos cualquier origen
 		return true
 	},
 }
