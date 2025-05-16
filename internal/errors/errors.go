@@ -19,6 +19,7 @@ const (
 	ErrorInternal           = "ERROR_INTERNAL"
 	ErrorUnknownMessageType = "ERROR_UNKNOWN_MESSAGE_TYPE"
 	ErrorMessageTooLarge    = "ERROR_MESSAGE_TOO_LARGE"
+	ErrorServerCapacity     = "ERROR_SERVER_CAPACITY"
 )
 
 // SendError sends a structured error message to the client
@@ -109,4 +110,9 @@ func UnknownMessageType(channel chan []byte, msgType string, clientID string) {
 // MessageTooLarge creates a message too large error
 func MessageTooLarge(channel chan []byte, clientID string) {
 	SendError(channel, ErrorMessageTooLarge, "El mensaje excede el tamaño máximo permitido", clientID)
+}
+
+// ServerCapacity envía un mensaje de error cuando el servidor está a capacidad máxima
+func ServerCapacity(ch chan []byte, clientID string) {
+	SendError(ch, ErrorServerCapacity, "El servidor está a capacidad máxima. Intente más tarde.", clientID)
 }

@@ -25,6 +25,9 @@ type Hub struct {
 	// Salas activas
 	Rooms map[string]*room.Room
 
+	// Límite máximo de salas
+	maxRooms int
+
 	// Canal para registrar nuevos clientes
 	Register chan interfaces.Client
 
@@ -59,6 +62,7 @@ func NewHub() *Hub {
 		cancel:         cancel,
 		Clients:        make(map[interfaces.Client]bool),
 		Rooms:          make(map[string]*room.Room),
+		maxRooms:       0, // Sin límite por defecto
 		Register:       make(chan interfaces.Client),
 		Unregister:     make(chan interfaces.Client),
 		CreateRoomChan: make(chan interfaces.Client),
@@ -66,6 +70,14 @@ func NewHub() *Hub {
 		DeleteRoomChan: make(chan string),
 		broadcast:      make(chan []byte),
 	}
+}
+
+// SetLimits establece los límites de recursos para el Hub
+func (h *Hub) SetLimits(maxRooms int) {
+	h.maxRooms = maxRooms
+	logger.Info("Límites de Hub configurados", logger.Fields{
+		"maxRooms": maxRooms,
+	})
 }
 
 // Close cancela el contexto y libera recursos
@@ -218,6 +230,19 @@ func (h *Hub) Run() {
 			}
 
 		case client := <-h.CreateRoomChan:
+			// Verificar si hemos alcanzado el límite de salas
+			if h.maxRooms > 0 && len(h.Rooms) >= h.maxRooms {
+				logger.Warn("Límite de salas alcanzado, rechazando creación de sala", logger.Fields{
+					"clientID":     client.GetID(),
+					"currentRooms": len(h.Rooms),
+					"maxRooms":     h.maxRooms,
+				})
+
+				// Enviar error al cliente usando la función de errors
+				errors.ServerCapacity(client.GetSendChannel(), client.GetID())
+				continue
+			}
+
 			// Crear un ID único para la sala
 			roomID := uuid.NewString()
 
@@ -263,9 +288,11 @@ func (h *Hub) Run() {
 			}
 
 			logger.Info("Sala creada", logger.Fields{
-				"roomID":   roomID,
-				"clientID": client.GetID(),
-				"symbol":   "X",
+				"roomID":    roomID,
+				"clientID":  client.GetID(),
+				"symbol":    "X",
+				"roomCount": len(h.Rooms),
+				"maxRooms":  h.maxRooms,
 			})
 
 		case joinReq := <-h.JoinRoomChan:
