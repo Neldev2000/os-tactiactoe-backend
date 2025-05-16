@@ -89,7 +89,8 @@ Sent after successfully joining a room:
   "payload": {
     "roomID": "room-identifier",
     "playerSymbol": "O",
-    "playerID": "your-player-id"
+    "playerID": "your-player-id",
+    "gameState": "[[\"X\",\"\",\"\"],[\"O\",\"\",\"\"],[\"X\",\"\",\"\"]]"
   }
 }
 ```
@@ -149,6 +150,17 @@ Sent when a player disconnects:
   "type": "PLAYER_LEFT",
   "payload": {
     "playerID": "player-id-who-left"
+  }
+}
+```
+
+### Player Reconnected
+Sent to players when another player reconnects to the game:
+```json
+{
+  "type": "PLAYER_RECONNECTED",
+  "payload": {
+    "playerID": "player-id-who-reconnected"
   }
 }
 ```
@@ -218,3 +230,188 @@ Common error codes:
 - The server sends ping messages every 54 seconds
 - If you don't receive anything for 60 seconds, consider the connection lost
 - Reconnect if the connection is lost and rejoin the room
+
+## Player Reconnection
+
+The server supports automatic player reconnection:
+
+- If a player disconnects (browser refresh, network issue, etc.), they can reconnect by joining the same room again
+- The server will recognize the player based on their ID and allow them to rejoin even if the room appears full
+- Upon reconnection, the player will receive a complete sequence of messages to restore their game state:
+  1. A `ROOM_JOINED` message with their room and player information, including the current game state
+  2. A `GAME_START` message with the complete board state and player mapping
+  3. A `GAME_UPDATE` message with the current game state
+- The opponent will receive a `PLAYER_RECONNECTED` notification
+- Player symbols and game progress are preserved during reconnection
+
+To reconnect:
+1. Establish a new WebSocket connection
+2. Send a `JOIN_ROOM` message with the same room ID as before
+3. Process the sequence of state restoration messages
+4. Continue play from the current game state
+
+This ensures games can continue even if temporary connection issues occur.
+
+## Frontend Implementation Guide for Reconnection
+
+To properly implement reconnection handling in your frontend application:
+
+1. **Persist connection data locally**:
+   - Store the room ID and player ID in localStorage or sessionStorage
+   - Example: `localStorage.setItem('ttt_roomId', roomId)`
+
+2. **Initialize WebSocket connection**:
+   - Create a function to establish and configure the WebSocket connection
+   - Example:
+     ```javascript
+     let ws = null;
+     
+     function connectWebSocket() {
+       return new Promise((resolve, reject) => {
+         // Close existing connection if any
+         if (ws) {
+           ws.close();
+         }
+         
+         // Create new connection
+         ws = new WebSocket('ws://your-server.com:8080/ws');
+         
+         // Set up event handlers
+         ws.onopen = () => {
+           console.log('WebSocket connection established');
+           resolve(ws);
+         };
+         
+         ws.onerror = (error) => {
+           console.error('WebSocket error:', error);
+           reject(error);
+         };
+         
+         ws.onmessage = (event) => {
+           const message = JSON.parse(event.data);
+           handleMessage(message);
+         };
+         
+         ws.onclose = (event) => {
+           console.log('WebSocket connection closed', event);
+           if (!event.wasClean) {
+             // Connection lost unexpectedly
+             startReconnectionProcess();
+           }
+         };
+       });
+     }
+     
+     function sendMessage(type, payload = {}) {
+       if (ws && ws.readyState === WebSocket.OPEN) {
+         ws.send(JSON.stringify({ type, payload }));
+       } else {
+         console.error('WebSocket not connected');
+       }
+     }
+     
+     function sendJoinRoomMessage(roomId) {
+       sendMessage('JOIN_ROOM', { roomId });
+     }
+     ```
+
+3. **Implement reconnection logic**:
+   - Set up automatic reconnection with exponential backoff
+   - Example:
+     ```javascript
+     function reconnect(attempt = 0) {
+       const maxAttempts = 5;
+       const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
+       
+       if (attempt < maxAttempts) {
+         // Set reconnecting flag to true
+         isReconnecting = true;
+         reconnectionStep = 0;
+         
+         showReconnectionStatus(`Reconnecting (attempt ${attempt + 1}/${maxAttempts})...`);
+         
+         setTimeout(() => {
+           connectWebSocket().then(() => {
+             // If connection successful
+             const roomId = localStorage.getItem('ttt_roomId');
+             if (roomId) {
+               // Rejoin the same room
+               sendJoinRoomMessage(roomId);
+             } else {
+               // Not in a game, reset reconnection state
+               isReconnecting = false;
+             }
+           }).catch(() => {
+             reconnect(attempt + 1);
+           });
+         }, delay);
+       } else {
+         // Max attempts reached
+         isReconnecting = false;
+         showReconnectionStatus("Reconnection failed. Please try manually reconnecting.");
+       }
+     }
+     ```
+
+4. **Handle reconnection responses**:
+   - Add a handler for the new `PLAYER_RECONNECTED` message type
+   - Update the UI to indicate when the opponent has reconnected
+   - Example:
+     ```javascript
+     function handleMessage(message) {
+       switch (message.type) {
+         case "PLAYER_RECONNECTED":
+           showNotification(`Player ${message.payload.playerID} has reconnected`);
+           break;
+         // other message handlers
+       }
+     }
+     ```
+
+5. **Maintain game state**:
+   - Process the reconnection message sequence in order:
+     1. `ROOM_JOINED`: Update local room and player information
+     2. `GAME_START`: Initialize the game board and player mappings
+     3. `GAME_UPDATE`: Apply current game state and turn information
+   - Example:
+     ```javascript
+     // Store references to reconnection state
+     let isReconnecting = false;
+     let reconnectionStep = 0;
+     
+     function handleMessage(message) {
+       // During reconnection, messages arrive in a specific sequence
+       if (isReconnecting) {
+         switch (message.type) {
+           case "ROOM_JOINED":
+             reconnectionStep = 1;
+             updateRoomInfo(message.payload);
+             break;
+             
+           case "GAME_START":
+             reconnectionStep = 2;
+             initializeGame(message.payload);
+             break;
+             
+           case "GAME_UPDATE":
+             reconnectionStep = 3;
+             updateGameState(message.payload);
+             if (reconnectionStep === 3) {
+               // Reconnection complete
+               isReconnecting = false;
+               showNotification("Reconnection successful!");
+             }
+             break;
+         }
+         return;
+       }
+       
+       // Regular message handling...
+     }
+     ```
+
+6. **User feedback**:
+   - Show reconnection status to users (attempting reconnection, reconnected, etc.)
+   - Allow manual reconnection attempts if automatic reconnection fails
+
+This approach ensures that players can seamlessly continue their games after connection issues, improving the overall user experience.

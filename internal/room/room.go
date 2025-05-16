@@ -3,6 +3,7 @@ package room
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"nvivas/backend/tictactoe-go-server/internal/errors"
 	"nvivas/backend/tictactoe-go-server/internal/game"
@@ -98,8 +99,135 @@ func (r *Room) Run() {
 			return
 
 		case client := <-r.Register:
+			// Check if client is reconnecting
+			isReconnecting := false
+			var reconnectSymbol string
+
+			// Check if this client ID already exists in PlayerSymbols
+			// but is not currently in the Clients map
+			if symbol, exists := r.GameState.PlayerSymbols[client.GetID()]; exists {
+				isReconnecting = true
+				reconnectSymbol = symbol
+				logger.Info("Cliente reconectándose a su juego", logger.Fields{
+					"roomID":   r.ID,
+					"clientID": client.GetID(),
+					"symbol":   symbol,
+				})
+			}
+
 			// Añadir cliente a r.Clients
 			r.Clients[client] = true
+
+			// Determine if we should treat this as a reconnection
+			if isReconnecting {
+				// Restore the player's symbol if reconnecting
+				r.GameState.PlayerSymbols[client.GetID()] = reconnectSymbol
+
+				// Convert board to JSON string for GameState
+				boardData := getBoardJSON(r.GameState.Board)
+				boardString, _ := json.Marshal(boardData)
+
+				// First send appropriate room joined message
+				roomJoinedMsg := models.RoomJoinedResponse{
+					Type:      "ROOM_JOINED",
+					RoomID:    r.ID,
+					PlayerID:  client.GetID(),
+					Symbol:    reconnectSymbol,
+					GameState: string(boardString),
+				}
+				joinedBytes, _ := json.Marshal(roomJoinedMsg)
+
+				select {
+				case client.GetSendChannel() <- joinedBytes:
+					logger.Info("Información de sala enviada a cliente reconectado", logger.Fields{
+						"clientID": client.GetID(),
+						"roomID":   r.ID,
+						"symbol":   reconnectSymbol,
+					})
+				default:
+					logger.Warn("No se pudo enviar ROOM_JOINED, canal posiblemente cerrado", logger.Fields{
+						"clientID": client.GetID(),
+						"roomID":   r.ID,
+					})
+				}
+
+				// Send current game state to the reconnected player
+				boardJSON := getBoardJSON(r.GameState.Board)
+
+				// Check if game is already in progress
+				if len(r.GameState.PlayerSymbols) == 2 {
+					// First send a more comprehensive GAME_START message with all player data
+					gameStartMsg := models.GameStartResponse{
+						Type:        "GAME_START",
+						Board:       boardJSON,
+						CurrentTurn: r.GameState.CurrentTurnSymbol,
+						Players:     r.GameState.PlayerSymbols,
+					}
+					startBytes, _ := json.Marshal(gameStartMsg)
+
+					select {
+					case client.GetSendChannel() <- startBytes:
+						logger.Info("Estado inicial enviado a cliente reconectado", logger.Fields{
+							"clientID": client.GetID(),
+							"roomID":   r.ID,
+							"symbol":   reconnectSymbol,
+						})
+					default:
+						logger.Warn("No se pudo enviar GAME_START, canal posiblemente cerrado", logger.Fields{
+							"clientID": client.GetID(),
+							"roomID":   r.ID,
+						})
+					}
+
+					// Then send the current game update with last move if available
+					updateMsg := models.GameUpdateResponse{
+						Type:        "GAME_UPDATE",
+						Board:       boardJSON,
+						CurrentTurn: r.GameState.CurrentTurnSymbol,
+					}
+					updateBytes, _ := json.Marshal(updateMsg)
+
+					select {
+					case client.GetSendChannel() <- updateBytes:
+						// Message sent successfully
+						logger.Info("Estado del juego enviado a cliente reconectado", logger.Fields{
+							"clientID": client.GetID(),
+							"roomID":   r.ID,
+						})
+					default:
+						logger.Warn("No se pudo enviar GAME_UPDATE, canal posiblemente cerrado", logger.Fields{
+							"clientID": client.GetID(),
+							"roomID":   r.ID,
+						})
+					}
+
+					// Also notify other players about reconnection
+					for c := range r.Clients {
+						if c.GetID() != client.GetID() {
+							reconnectMsg := models.PlayerReconnectedResponse{
+								Type:     "PLAYER_RECONNECTED",
+								PlayerID: client.GetID(),
+							}
+							msgBytes, _ := json.Marshal(reconnectMsg)
+
+							select {
+							case c.GetSendChannel() <- msgBytes:
+								// Message sent successfully
+							default:
+								logger.Warn("No se pudo enviar notificación de reconexión, canal posiblemente cerrado", logger.Fields{
+									"clientID": c.GetID(),
+									"roomID":   r.ID,
+								})
+							}
+						}
+					}
+
+					continue // Skip the normal flow for new connections
+				}
+			}
+
+			// If not reconnecting or if reconnecting to a waiting room,
+			// continue with the normal connection flow
 
 			// Determinar cuántos jugadores hay en la sala
 			playerCount := len(r.Clients)
@@ -310,19 +438,33 @@ func (r *Room) Run() {
 					})
 				}
 
-				// Si la sala queda vacía, auto-destruirse
+				// Si la sala queda vacía, programar auto-destrucción con un temporizador
+				// para permitir reconexiones durante navegación de páginas
 				if len(r.Clients) == 0 {
-					logger.Info("Sala vacía, eliminando", logger.Fields{"roomID": r.ID})
+					logger.Info("Sala vacía, programando eliminación con retraso", logger.Fields{"roomID": r.ID})
 
-					// Verificar si el Hub tiene método para eliminar salas
-					hubWithDelete, ok := r.Hub.(interface {
-						DeleteRoom(roomID string)
-					})
+					// Usar una goroutine con temporizador para eliminar la sala después de un tiempo
+					go func(roomID string) {
+						// Esperar 30 segundos antes de verificar si aún está vacía
+						time.Sleep(30 * time.Second)
 
-					if ok {
-						// Informar al Hub que elimine esta sala
-						hubWithDelete.DeleteRoom(r.ID)
-					}
+						// Verificar si la sala aún existe y está vacía
+						if len(r.Clients) == 0 {
+							logger.Info("Sala sigue vacía después del tiempo de gracia, eliminando", logger.Fields{"roomID": roomID})
+
+							// Verificar si el Hub tiene método para eliminar salas
+							hubWithDelete, ok := r.Hub.(interface {
+								DeleteRoom(roomID string)
+							})
+
+							if ok {
+								// Informar al Hub que elimine esta sala
+								hubWithDelete.DeleteRoom(roomID)
+							}
+						} else {
+							logger.Info("Sala ya no está vacía, cancelando eliminación", logger.Fields{"roomID": roomID})
+						}
+					}(r.ID)
 				}
 			}
 

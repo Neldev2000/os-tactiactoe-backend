@@ -52,10 +52,11 @@ type RoomCreatedResponse struct {
 
 // RoomJoinedResponse is sent after successfully joining a room
 type RoomJoinedResponse struct {
-	Type     string `json:"type"`
-	RoomID   string `json:"roomId"`
-	PlayerID string `json:"playerId"`
-	Symbol   string `json:"symbol"`
+	Type      string `json:"type"`
+	RoomID    string `json:"roomId"`
+	PlayerID  string `json:"playerId"`
+	Symbol    string `json:"symbol"`
+	GameState string `json:"gameState"`
 }
 
 // PlayerJoinedResponse is sent to the first player when a second player joins
@@ -96,6 +97,12 @@ type ErrorResponse struct {
 
 // PlayerLeftResponse is sent when a player leaves the game
 type PlayerLeftResponse struct {
+	Type     string `json:"type"`
+	PlayerID string `json:"playerId"`
+}
+
+// PlayerReconnectedResponse is sent when a player reconnects to the game
+type PlayerReconnectedResponse struct {
 	Type     string `json:"type"`
 	PlayerID string `json:"playerId"`
 }

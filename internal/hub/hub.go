@@ -272,8 +272,21 @@ func (h *Hub) Run() {
 			// Task 29: Mejorar la lógica de unirse a salas
 			// Buscar la sala por su ID
 			if room, exists := h.Rooms[joinReq.RoomID]; exists {
-				// Verificar si la sala está llena antes de unirse
-				if len(room.Clients) >= 2 {
+				// Check if this client is rejoining a room they were previously in
+				isRejoining := false
+				for _, playerID := range room.GetPlayerIDs() {
+					if playerID == joinReq.Client.GetID() {
+						isRejoining = true
+						logger.Info("Cliente reconectándose a su sala anterior", logger.Fields{
+							"clientID": joinReq.Client.GetID(),
+							"roomID":   joinReq.RoomID,
+						})
+						break
+					}
+				}
+
+				// Verificar si la sala está llena antes de unirse (solo si no es una reconexión)
+				if len(room.Clients) >= 2 && !isRejoining {
 					// Sala llena, enviar mensaje de error
 					select {
 					case joinReq.Client.GetSendChannel() <- createErrorMessage(errors.ErrorRoomFull, "La sala ya está llena", joinReq.Client.GetID()):
@@ -300,7 +313,7 @@ func (h *Hub) Run() {
 					joinReq.Client.SetRoom(nil)
 				}
 
-				// La sala existe y tiene espacio
+				// La sala existe y tiene espacio o es una reconexión
 				// Actualizar la referencia a la sala en el cliente
 				joinReq.Client.SetRoom(room)
 
@@ -311,6 +324,7 @@ func (h *Hub) Run() {
 				logger.Info("Cliente unido a sala", logger.Fields{
 					"roomID":   joinReq.RoomID,
 					"clientID": joinReq.Client.GetID(),
+					"isRejoin": isRejoining,
 				})
 			} else {
 				// Task 29: Si la sala no existe, enviar un mensaje de error claro
